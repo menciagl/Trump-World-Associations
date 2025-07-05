@@ -1,0 +1,298 @@
+---
+title: 'Assignment 2: Trump World Associations'
+author: "Mencía Gómez and Laura Toro"
+date: "2025-04-30"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+We are going to use the dataset **"Trump World Associations"**: a network of people and organizations related to Donald J Trump, the President of the United States.
+
+In this work, we seek to **predict possible connections in a complex network of relationships between people and organizations associated with Donald Trump**.
+
+## Load data
+
+We change names so they don't give us problems in the next exercises
+
+```{r}
+library(readr)
+df <- read_csv("trumpworld.csv")
+
+names(df) <- gsub(" ", "", names(df)) #name change 
+
+df
+
+```
+
+We are going to test that the network fullfills the requirements for this exercise:
+
+```{r}
+
+library(igraph)
+
+edges <- data.frame(from = df$EntityA, to = df$EntityB)
+g <- graph_from_data_frame(edges, directed = FALSE)
+
+vcount(g)  #nodes
+ecount(g)  #links
+
+```
+
+It has 2669 nodes and 3380 links
+
+```{r}
+
+# Calculate connected components
+components_info <- components(g)
+max(components_info$csize)
+
+```
+
+Although the number of links is less than 5000, the size of the largest connected component (LCC) is 2669 links so this database is useful for the exercise.
+
+# First step
+
+**Delete a fraction of real edges in the network and create a table of those links deleted (positive class) and of links non-present (negative class)**
+
+We randomly removed 10% of the real links and used them as the positive class (true links removed), while generating nonexistent links as the negative class, taking care not to select pairs that already existed. This step is important because if we accidentally select a link that is actually present (or was present before) as a "negative" link, we would be feeding the model with erroneous data: the model would think that a real connection is false, which affects the quality of the prediction.
+
+```{r}
+# Randomly choose the edges to remove
+set.seed(123)
+E_original <- as_data_frame(g, what = "edges")
+n_delete <- floor(0.1 * nrow(E_original))  
+delete_idx <- sample(1:nrow(E_original), n_delete)
+E_deleted <- E_original[delete_idx, ]
+E_remaining <- E_original[-delete_idx, ]
+
+# Create node table from names appearing in E_remaining
+all_nodes <- unique(c(E_remaining$from, E_remaining$to))
+vertices_df <- data.frame(name = all_nodes, stringsAsFactors = FALSE)
+
+g_train <- graph_from_data_frame(E_remaining, directed = FALSE, vertices = vertices_df)
+
+# Save the removed edges as "positive"
+positive_links <- E_deleted
+
+
+```
+
+**Generate negative links (unconnected peers)**
+
+```{r}
+# Number of negative links we want to generate (equal to the number of positive links)
+n_negative <- nrow(positive_links)
+
+# Get all possible pairs of nodes
+all_possible_pairs <- t(combn(V(g_train)$name, 2))
+colnames(all_possible_pairs) <- c("from", "to")
+all_possible_pairs <- as.data.frame(all_possible_pairs, stringsAsFactors = FALSE)
+
+# Create a pair identifier to facilitate comparison
+all_possible_pairs$pair_id <- paste(pmin(all_possible_pairs$from, all_possible_pairs$to),
+                                    pmax(all_possible_pairs$from, all_possible_pairs$to), sep = "_")
+
+# Create similar identifiers for existing links
+existing_edges <- as_data_frame(g_train, what = "edges")
+existing_edges$pair_id <- paste(pmin(existing_edges$from, existing_edges$to),
+                                pmax(existing_edges$from, existing_edges$to), sep = "_")
+
+# Filter out peers that are not in the network
+non_edges <- all_possible_pairs[!all_possible_pairs$pair_id %in% existing_edges$pair_id, ]
+
+# Randomly select negative links
+set.seed(456)
+negative_links <- non_edges[sample(1:nrow(non_edges), n_negative), c("from", "to")]
+
+# Mark classes for training
+positive_links$class <- 1
+negative_links$class <- 0
+
+# Combine both classes
+link_prediction_df <- rbind(positive_links[, c("from", "to", "class")],
+                            negative_links)
+
+head(link_prediction_df)
+
+```
+
+# Second step
+
+**Generate a number of proximity/similarty metrics heuristics for each link in the positive and negative class**
+
+We're going to calculate all the proximity metrics, for each pair in link_prediction_df:
+
+-   Common Neighbors
+-   Jaccard
+-   Adamic-Adar
+-   Preferential Attachment
+-   Shortest Path
+
+```{r}
+library(igraph)
+
+# Columns to store metrics
+link_prediction_df$common_neighbors <- NA
+link_prediction_df$jaccard <- NA
+link_prediction_df$adamic_adar <- NA
+link_prediction_df$pref_attachment <- NA
+link_prediction_df$shortest_path <- NA
+
+# Loop: Iterate over the rows of link_prediction_df
+for (i in 1:nrow(link_prediction_df)) {
+  
+  # Get the corresponding vertices of 'from' and 'to'
+  from <- link_prediction_df$from[i]
+  to <- link_prediction_df$to[i]
+  
+  # Check if the 'from' and 'to' nodes are in the graph (g_train)
+  if (from %in% V(g_train)$name && to %in% V(g_train)$name) {
+    
+    # Get the neighbors of the 'from' and 'to' nodes
+    nei_from <- neighbors(g_train, from)
+    nei_to <- neighbors(g_train, to)
+    
+    # **1. Common Neighbors**
+    common_neighbors <- length(intersection(nei_from, nei_to))
+    link_prediction_df$common_neighbors[i] <- common_neighbors
+    
+    # **2. Jaccard Coefficient**
+    union_size <- length(union(nei_from, nei_to))
+    if (union_size > 0) {
+      jaccard <- common_neighbors / union_size
+    } else {
+      jaccard <- 0
+    }
+    link_prediction_df$jaccard[i] <- jaccard
+    
+    # **3. Adamic-Adar**
+    common <- intersection(nei_from, nei_to)
+    if (length(common) > 0) {
+      degrees <- degree(g_train, common)
+      adamic_adar <- sum(1 / log(degrees[degrees > 1]))  # Evitar log(1) = 0
+    } else {
+      adamic_adar <- 0
+    }
+    link_prediction_df$adamic_adar[i] <- adamic_adar
+    
+    # **4. Preferential Attachment**
+    pref_attachment <- degree(g_train, from) * degree(g_train, to)
+    link_prediction_df$pref_attachment[i] <- pref_attachment
+    
+    # **5. Shortest Path Distance**
+    shortest_path <- suppressWarnings(distances(g_train, v = from, to = to))
+    if (is.infinite(shortest_path)) {
+      shortest_path <- NA  # Si no hay camino, asignar NA
+    }
+    link_prediction_df$shortest_path[i] <- shortest_path
+  }
+}
+
+
+head(link_prediction_df)
+
+```
+
+We iterate over every pair of nodes in `link_prediction_df$from` and `link_prediction_df$to`, and obtain its neighbors. Then we calculate the metrics and, in the end, we obtain a data frame with new columns for the metrics for each pair of nodes.
+
+For example, if we look at the link from RUSSELL FLICKER to THE TRUMP ORGANIZATION, INC. we see:
+
+-   The common neighbors metric is 1, meaning they share one mutual connection in the network.
+
+-   The Jaccard coefficient is approximately 0.0227, indicating that their shared neighbors represent only about 2.27% of their combined neighborhood — suggesting relatively low similarity.
+
+-   The Adamic-Adar score is 0.2836, which gives slightly more weight to rare (less connected) common neighbors.
+
+-   The preferential attachment score is 44, calculated as the product of their degrees — indicating a moderate likelihood of connection based on their overall connectivity.
+
+-   The shortest path between them is 2, meaning they are indirectly connected via one intermediate node.
+
+# Third step
+
+**Train a binary classifier to predict the links, i.e., to predict the class (positive/negative) using those heuristics. Use cross-validation**
+
+First we have to split the data and train the logistic model (we have 2 categories that we want to predict):
+
+```{r}
+# Eliminate NAs and turn class to factor
+df_model <- na.omit(link_prediction_df)
+df_model$class <- as.factor(df_model$class)
+
+# Split train set using cross validation
+library (caret)
+set.seed(123)
+
+train_control <- trainControl(method = "cv", number = 5, classProbs = TRUE, 
+                              summaryFunction = twoClassSummary,
+                              savePredictions = "final")
+
+# Relabel levels
+levels(df_model$class) <- c("negative", "positive")  # 0=negative, 1=positive
+
+# Train logistic regression with cross-validation
+glm_model <- train(class ~ common_neighbors + jaccard + adamic_adar + 
+                            pref_attachment + shortest_path,
+                  data = df_model,
+                  method = "glm",
+                  family = "binomial",
+                  trControl = train_control,
+                  metric = "ROC")
+
+# View summary of final model
+summary(glm_model$finalModel)
+
+```
+
+Prediction and evaluation:
+
+```{r}
+
+confusionMatrix(glm_model$pred$pred, glm_model$pred$obs, positive = "positive")
+
+```
+
+The logistic regression model for link prediction shows a good performance in general, with an **accuracy of 88.5%**, that is, the model correctly predicts nearly 89% of the cases. The Kappa statistic measures the agreement between prediction and actual truth, so 0.71 indicates good performance (because it's a high value).
+
+The model has also a very high **specificity of 95.4%**, indicating it is highly reliable at identifying non-links. Its precision -Pos Pred Value- (86.96%) suggests that when the model predicts a link, it is usually correct. However, the **sensitivity is lower (72.5%)**, meaning it misses some true links (false negatives), although it's not a low value overall. The balanced accuracy of 83.9% reflects a solid trade-off between correctly identifying links and non-links.
+
+Overall, the model is very good at detecting negatives, avoiding false positives, but it can miss some true positives (although few in this case). The model performs well, though it may benefit from further tuning or more complex models to improve its recall -Sensitivity- (We will address this in the "improvements" section).
+
+
+# Fourth step
+
+**Evaluate the precision of the model. Which heuristic is the most important. Why do you think it is the most important?**
+
+```{r}
+summary(glm_model)
+
+```
+
+The logistic regression model includes several predictors that show varying levels of statistical significance. The predictors that were significant (p < 0.05) include Jaccard, Preferential Attachment, and Shortest Path. Adamic-Adar was significant at a p-value <0.1, while Common Neighbors was not significant at all.
+Among these predictors, Shortest Path is the most significant (p < 0.001), followed by Preferential Attachment (p < 0.01), Jaccard (p < 0.05), and Adamic-Adar (p < 0.1).
+
+**The most important heuristic seems to be Shortest Path**, as it has the lowest p-value and a moderately large coefficient (-1.01), making it the strongest predictor in the model. This suggests that ¨**the shorter the path between two nodes, the more likely they are to be directly connected**, emphasizing the importance of proximity in predicting links.
+
+On the other side, although Adamic Adar is an heuristic with less significance than the rest it has the highest coefficient (6.38). This means that higher Adamic-Adar scores are associated with a greater likelihood of a link. In simple terms, if two nodes share a rare or less-connected neighbor, this can be a strong indicator of a potential connection, though the statistical evidence is weaker.
+
+Despite this, we consider Shortest Past to be the most important heuristic due to its stronger statistical significance and consistent contribution to the model.
+
+Finally, the low AIC (281.39) suggests a good model fit.
+
+# Improvements
+
+**Comment on potential ways to improve the link prediction**
+
+Although the current logistic regression model offers good overall performance (high accuracy and low AIC), there were some limitations (like low recall) and we found some ways to improve it:
+
+-   First, more complex models such as Random Forests, XGBoost or neural networks could be tested, which capture non-linear relationships and more complex combinations between variables.
+
+-   Another potential improvement is to increase the number and variety of negative links selected, ensuring that they represent different areas of the network well.
+
+-   More rigorous cross-validation (k-fold) can be performed to obtain a more robust estimate of overall performance.
+
+However, **the model is still very good and does not need major changes**. The model developed to predict links in Trump's association network has proven effective in identifying potential connections between individuals and organizations associated with Donald Trump. Furthermore, by identifying potential links between actors not directly connected, the model helps predict new collaborations or influences within this network, which could be useful for political studies, influence network analysis, or public relations strategies.
