@@ -1,3 +1,4 @@
-For the subject **Social Network Analysis**, we used the dataset “Trump World Associations” -a network of people and organizations related to Donald J Trump, the President of the United States-, available in Buzzfeed: https://www.buzzfeednews.com/article/johntemplon/help-us-map-trumpworld 
+ES: Para la asignatura **Análisis de Redes Sociales**, utilizamos el conjunto de datos «Trump World Associations» —una red de personas y organizaciones relacionadas con Donald J. Trump, presidente de Estados Unidos—, disponible en Buzzfeed: https://www.buzzfeednews.com/article/johntemplon/help-us-map-trumpworld. En este trabajo, buscamos predecir posibles conexiones en una compleja red de relaciones entre personas y organizaciones asociadas con Donald Trump.
 
-In this work, we seek to predict possible connections in a complex network of relationships between people and organizations associated with Donald Trump.
+
+EN: For the subject **Social Network Analysis**, we used the dataset “Trump World Associations” -a network of people and organizations related to Donald J Trump, the President of the United States-, available in Buzzfeed: https://www.buzzfeednews.com/article/johntemplon/help-us-map-trumpworld  In this work, we seek to predict possible connections in a complex network of relationships between people and organizations associated with Donald Trump.
